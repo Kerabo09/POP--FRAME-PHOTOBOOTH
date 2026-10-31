@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
-import { Download, Share2, X, Check } from "lucide-react";
+import { Download, Share2, X, Check, Smartphone } from "lucide-react";
+import { makeStory } from "../lib/strips";
 import type { PhotoSession } from "./workstation";
 
 interface DownloadShareProps {
@@ -82,25 +83,31 @@ export function DownloadShare({ session, onClose, onNewSession }: DownloadShareP
     }
   }, [downloaded]);
 
-  function handleDownload() {
+  function handleDownload(src: string = session.strip, suffix = "") {
     const a = document.createElement("a");
-    a.href = session.strip;
-    a.download = `popframe-${session.mode}-${session.id}.jpg`;
+    a.href = src;
+    a.download = `popframe-${session.mode}-${session.id}${suffix}.jpg`;
     a.click();
     setDownloaded(true);
   }
 
-  async function handleShare() {
+  // 9:16 story: opens the phone's share sheet (Instagram, Facebook, TikTok, Messenger…)
+  async function handleStory() {
+    const story = await makeStory(session.strip, session.style ?? "pop");
+    await handleShare(story, "-story");
+  }
+
+  async function handleShare(src: string = session.strip, suffix = "") {
     try {
-      const blob = await (await fetch(session.strip)).blob();
-      const file = new File([blob], `popframe-${session.mode}-${session.id}.jpg`, { type: "image/jpeg" });
+      const blob = await (await fetch(src)).blob();
+      const file = new File([blob], `popframe-${session.mode}-${session.id}${suffix}.jpg`, { type: "image/jpeg" });
       if (navigator.canShare?.({ files: [file] })) {
         await navigator.share({ files: [file], title: "My POP FRAME strip", text: "Snapped with POP FRAME" });
         return;
       }
       // Desktop fallback: copy the image to the clipboard if supported
       if (navigator.clipboard && "ClipboardItem" in window) {
-        await navigator.clipboard.write([new ClipboardItem({ "image/png": await toPng(session.strip) })]);
+        await navigator.clipboard.write([new ClipboardItem({ "image/png": await toPng(src) })]);
         setCopied(true);
         setTimeout(() => setCopied(false), 2000);
         return;
@@ -108,7 +115,7 @@ export function DownloadShare({ session, onClose, onNewSession }: DownloadShareP
     } catch (e) {
       if ((e as DOMException)?.name === "AbortError") return; // user closed the share sheet
     }
-    handleDownload();
+    handleDownload(src, suffix);
   }
 
   return (
@@ -147,7 +154,7 @@ export function DownloadShare({ session, onClose, onNewSession }: DownloadShareP
           {/* Action buttons */}
           <div className="flex flex-col sm:flex-row gap-4">
             <button
-              onClick={handleDownload}
+              onClick={() => handleDownload()}
               className="flex-1 bg-[#191d12] drop-shadow-[4px_4px_0px_black] border border-[#191d12] flex items-center justify-center gap-2 py-4 cursor-pointer hover:opacity-90 active:translate-y-[2px]"
             >
               {downloaded ? <Check size={16} className="text-[#a3e635]" /> : <Download size={16} className="text-[#f7fbe8]" />}
@@ -157,7 +164,7 @@ export function DownloadShare({ session, onClose, onNewSession }: DownloadShareP
               </div>
             </button>
             <button
-              onClick={handleShare}
+              onClick={() => handleShare()}
               className="flex-1 bg-white drop-shadow-[4px_4px_0px_black] border border-[#191d12] flex items-center justify-center gap-2 py-4 cursor-pointer hover:opacity-90 active:translate-y-[2px]"
             >
               {copied ? <Check size={16} className="text-green-600" /> : <Share2 size={16} className="text-[#191d12]" />}
@@ -166,6 +173,14 @@ export function DownloadShare({ session, onClose, onNewSession }: DownloadShareP
               </span>
             </button>
           </div>
+
+          <button
+            onClick={handleStory}
+            className="bg-[#fc79bd] drop-shadow-[4px_4px_0px_black] border border-[#191d12] flex items-center justify-center gap-2 py-3 cursor-pointer hover:opacity-90 active:translate-y-[2px]"
+          >
+            <Smartphone size={16} className="text-[#191d12]" />
+            <span className="font-['Space_Grotesk',sans-serif] font-bold text-[#191d12] text-sm uppercase">POST AS STORY (9:16)</span>
+          </button>
 
           {/* Secondary info */}
           <div className="bg-[#ecf0dd] border border-dashed border-[#191d12] p-4 flex gap-4 items-start">

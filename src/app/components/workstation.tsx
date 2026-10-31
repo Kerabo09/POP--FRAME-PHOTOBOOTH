@@ -1,6 +1,8 @@
-import { useRef, useEffect, useState, useCallback } from "react";
+import { useRef, useEffect, useState, useCallback, Fragment } from "react";
 import { Camera, Zap, Timer, SwitchCamera, X, RefreshCw } from "lucide-react";
-import { FILTERS, drawFiltered } from "../lib/filters";
+import { FILTERS, drawFiltered, applyVintage, GRAIN_URL } from "../lib/filters";
+import { applyEffect, drawVideoCover } from "../lib/effects";
+import { FRAMES, STRIP_STYLES, PHOTO_W, PHOTO_H, assembleStrip } from "../lib/strips";
 
 export type CaptureMode = "solo" | "couple" | "family";
 
@@ -12,6 +14,7 @@ export interface PhotoSession {
   timestamp: number;
   filter?: string;
   frame?: string;
+  style?: string;
 }
 
 interface WorkstationProps {
@@ -26,70 +29,11 @@ const MODE_CONFIG = {
   family: { label: "FAMILY GRID", count: 4, title: "FAMILY", subtitle: "GRID", description: "Four frames, four memories. Gather everyone in the frame and capture your best group moments." },
 };
 
-const FRAMES = [
-  { id: "white", label: "White", bg: "#ffffff", fg: "#191d12" },
-  { id: "lime", label: "Lime", bg: "#a3e635", fg: "#191d12" },
-  { id: "pink", label: "Pink", bg: "#fc79bd", fg: "#191d12" },
-  { id: "sky", label: "Sky", bg: "#b9d4ff", fg: "#191d12" },
-  { id: "ink", label: "Ink", bg: "#191d12", fg: "#a3e635" },
-];
-
-const PHOTO_W = 600;
-const PHOTO_H = 450; // 4:3 — same ratio as the viewfinder
-
-function loadImage(src: string): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = reject;
-    img.src = src;
-  });
-}
-
-async function assembleStrip(photos: string[], mode: CaptureMode, frameId: string): Promise<string> {
-  const frame = FRAMES.find((f) => f.id === frameId) ?? FRAMES[0];
-  const PADDING = 24;
-  const BRANDING_H = 80;
-  const cols = mode === "family" ? 2 : 1;
-  const rows = mode === "family" ? 2 : photos.length;
-  const canvasW = PHOTO_W * cols + PADDING * (cols + 1);
-  const canvasH = PHOTO_H * rows + PADDING * (rows + 1) + BRANDING_H;
-
-  const canvas = document.createElement("canvas");
-  canvas.width = canvasW;
-  canvas.height = canvasH;
-  const ctx = canvas.getContext("2d")!;
-
-  ctx.fillStyle = frame.bg;
-  ctx.fillRect(0, 0, canvasW, canvasH);
-  ctx.strokeStyle = "#191d12";
-  ctx.lineWidth = 4;
-  ctx.strokeRect(2, 2, canvasW - 4, canvasH - 4);
-
-  const imgs = await Promise.all(photos.map(loadImage));
-  imgs.forEach((img, i) => {
-    const x = PADDING + (mode === "family" ? (i % 2) * (PHOTO_W + PADDING) : 0);
-    const y = PADDING + (mode === "family" ? Math.floor(i / 2) : i) * (PHOTO_H + PADDING);
-    ctx.drawImage(img, x, y, PHOTO_W, PHOTO_H);
-    ctx.strokeStyle = "#191d12";
-    ctx.lineWidth = 3;
-    ctx.strokeRect(x, y, PHOTO_W, PHOTO_H);
-  });
-
-  const brandY = canvasH - BRANDING_H;
-  ctx.fillStyle = frame.fg;
-  ctx.fillRect(PADDING, brandY, canvasW - PADDING * 2, 2);
-  ctx.font = "bold 26px 'Space Grotesk', sans-serif";
-  ctx.textAlign = "center";
-  ctx.fillText("POP FRAME MEMORIES", canvasW / 2, brandY + 48);
-
-  return canvas.toDataURL("image/jpeg", 0.92);
-}
-
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export function Workstation({ captureMode, onCaptureModeChange, onSessionComplete }: WorkstationProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const fxCanvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const capturedRef = useRef<string[]>([]);
   const cancelRef = useRef(false);
@@ -106,6 +50,7 @@ export function Workstation({ captureMode, onCaptureModeChange, onSessionComplet
   const [timerSeconds, setTimerSeconds] = useState(3);
   const [filterId, setFilterId] = useState("normal");
   const [frameId, setFrameId] = useState("white");
+  const [styleId, setStyleId] = useState("pop");
 
   const config = MODE_CONFIG[captureMode];
   const filter = FILTERS.find((f) => f.id === filterId) ?? FILTERS[0];
@@ -157,6 +102,28 @@ export function Workstation({ captureMode, onCaptureModeChange, onSessionComplet
   // Stop an in-progress session if the user leaves the page
   useEffect(() => () => { cancelRef.current = true; }, []);
 
+  // Live preview for pixel effects: draw the video into a small canvas and run the effect ~30fps
+  useEffect(() => {
+    const effect = filter.effect;
+    const canvas = fxCanvasRef.current;
+    const video = videoRef.current;
+    if (!effect || !canvas || !video) return;
+    const W = 400, H = 300;
+    canvas.width = W;
+    canvas.height = H;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
+    let raf = 0, last = 0;
+    const loop = (now: number) => {
+      raf = requestAnimationFrame(loop);
+      if (now - last < 33 || !video.videoWidth) return;
+      last = now;
+      drawVideoCover(ctx, video, W, H, mirrored);
+      applyEffect(effect, ctx, W, H, now / 1000);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [filter.effect, mirrored, cameraReady]);
+
   const capturePhoto = useCallback((): string | null => {
     const video = videoRef.current;
     if (!video || !video.videoWidth) return null;
@@ -176,8 +143,10 @@ export function Workstation({ captureMode, onCaptureModeChange, onSessionComplet
       ctx.scale(-1, 1);
     }
     drawFiltered(ctx, video, filter.css, sx, sy, sw, sh, 0, 0, PHOTO_W, PHOTO_H);
+    if (filter.effect) applyEffect(filter.effect, ctx, PHOTO_W, PHOTO_H, performance.now() / 1000);
+    if (filter.fx) applyVintage(ctx, PHOTO_W, PHOTO_H, filter.fx);
     return canvas.toDataURL("image/jpeg", 0.92);
-  }, [filter.css, mirrored]);
+  }, [filter.css, filter.fx, filter.effect, mirrored]);
 
   const triggerFlash = useCallback(() => {
     if (flashMode === "off") return;
@@ -220,7 +189,7 @@ export function Workstation({ captureMode, onCaptureModeChange, onSessionComplet
       return;
     }
 
-    const strip = await assembleStrip(capturedRef.current, captureMode, frameId);
+    const strip = await assembleStrip(capturedRef.current, captureMode, frameId, styleId, Date.now());
     const session: PhotoSession = {
       id: Date.now().toString(),
       mode: captureMode,
@@ -229,11 +198,12 @@ export function Workstation({ captureMode, onCaptureModeChange, onSessionComplet
       timestamp: Date.now(),
       filter: filter.label,
       frame: frameId,
+      style: styleId,
     };
     setIsCapturing(false);
     setCapturedPhotos([]);
     onSessionComplete(session);
-  }, [isCapturing, cameraReady, config.count, timerSeconds, triggerFlash, capturePhoto, captureMode, frameId, filter.label, onSessionComplete]);
+  }, [isCapturing, cameraReady, config.count, timerSeconds, triggerFlash, capturePhoto, captureMode, frameId, styleId, filter.label, onSessionComplete]);
 
   // Space bar = snap
   useEffect(() => {
@@ -308,7 +278,7 @@ export function Workstation({ captureMode, onCaptureModeChange, onSessionComplet
                   muted
                   onLoadedData={() => setCameraReady(true)}
                   className="absolute inset-0 w-full h-full object-cover transition-[filter] duration-200"
-                  style={{ transform: mirrored ? "scaleX(-1)" : "none", filter: filter.css }}
+                  style={{ transform: mirrored ? "scaleX(-1)" : "none", filter: filter.css, opacity: filter.effect ? 0 : 1 }}
                 />
               ) : (
                 <div className="absolute inset-0 flex items-center justify-center bg-[#1a1a1a] p-4">
@@ -323,6 +293,23 @@ export function Workstation({ captureMode, onCaptureModeChange, onSessionComplet
                     </button>
                   </div>
                 </div>
+              )}
+
+              {filter.effect && !cameraError && (
+                <canvas ref={fxCanvasRef} className="absolute inset-0 w-full h-full pointer-events-none" />
+              )}
+
+              {filter.fx && !cameraError && (
+                <>
+                  <div
+                    className="absolute inset-0 pointer-events-none"
+                    style={{ background: `radial-gradient(ellipse at center, transparent 40%, rgba(0,0,0,${filter.fx.vignette}) 100%)` }}
+                  />
+                  <div
+                    className="absolute inset-0 pointer-events-none mix-blend-overlay"
+                    style={{ backgroundImage: GRAIN_URL, opacity: Math.min(1, filter.fx.grain * 3) }}
+                  />
+                </>
               )}
 
               {flash && <div className="absolute inset-0 bg-white z-20 pointer-events-none" />}
@@ -370,11 +357,14 @@ export function Workstation({ captureMode, onCaptureModeChange, onSessionComplet
 
           {/* Filter picker */}
           <div className="w-full max-w-[484px]">
-            <p className="font-['Lexend',sans-serif] font-black text-[#191d12] text-xs uppercase mb-2">FILTERS</p>
+            <p className="font-['Lexend',sans-serif] font-black text-[#191d12] text-xs uppercase mb-2">FILTERS <span className="opacity-60">· VINTAGE · BOOTH EFFECTS · SNAP LENSES →</span></p>
             <div className="flex gap-2 overflow-x-auto pb-2 snap-x -mx-1 px-1" role="radiogroup" aria-label="Camera filters">
-              {FILTERS.map((f) => (
+              {FILTERS.map((f, idx) => (
+                <Fragment key={f.id}>
+                  {idx > 0 && (f.group ?? (f.fx ? "vintage" : "")) !== (FILTERS[idx - 1].group ?? (FILTERS[idx - 1].fx ? "vintage" : "")) && (
+                    <span className="shrink-0 w-px self-stretch bg-[#191d12]/40 mx-1" aria-hidden />
+                  )}
                 <button
-                  key={f.id}
                   role="radio"
                   aria-checked={filterId === f.id}
                   onClick={() => setFilterId(f.id)}
@@ -385,6 +375,7 @@ export function Workstation({ captureMode, onCaptureModeChange, onSessionComplet
                   <span className="w-4 h-4 rounded-full border border-[#191d12] shrink-0" style={{ background: f.swatch }} />
                   {f.label}
                 </button>
+                </Fragment>
               ))}
             </div>
           </div>
@@ -409,7 +400,29 @@ export function Workstation({ captureMode, onCaptureModeChange, onSessionComplet
 
           <p className="font-['Lexend',sans-serif] text-[#191d12] text-sm sm:text-base opacity-80 max-w-xs">{config.description}</p>
 
-          {/* Strip colour */}
+          {/* Strip style */}
+          <div className="w-full">
+            <p className="font-['Lexend',sans-serif] font-black text-[#191d12] text-xs uppercase mb-2">STRIP STYLE</p>
+            <div className="flex gap-2 flex-wrap justify-center md:justify-start" role="radiogroup" aria-label="Strip style">
+              {STRIP_STYLES.map((st) => (
+                <button
+                  key={st.id}
+                  role="radio"
+                  aria-checked={styleId === st.id}
+                  onClick={() => setStyleId(st.id)}
+                  className={`flex items-center gap-2 px-3 min-h-[44px] border border-[#191d12] cursor-pointer font-['Space_Grotesk',sans-serif] text-xs uppercase transition-colors ${
+                    styleId === st.id ? "bg-[#191d12] text-[#a3e635] font-bold drop-shadow-[2px_2px_0px_black]" : "bg-white text-[#191d12] hover:bg-[#f0f4e0]"
+                  }`}
+                >
+                  <span className="w-4 h-4 border border-[#191d12] shrink-0" style={{ background: st.swatch }} />
+                  {st.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Strip colour (Pop style only) */}
+          {styleId === "pop" && (
           <div className="w-full">
             <p className="font-['Lexend',sans-serif] font-black text-[#191d12] text-xs uppercase mb-2">STRIP COLOR</p>
             <div className="flex gap-2 justify-center md:justify-start" role="radiogroup" aria-label="Strip color">
@@ -427,6 +440,7 @@ export function Workstation({ captureMode, onCaptureModeChange, onSessionComplet
               ))}
             </div>
           </div>
+          )}
 
           {/* Snap button */}
           {isCapturing ? (
